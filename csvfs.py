@@ -34,7 +34,7 @@ class CSVFilesystemBackend:
             # Create the last modified table if it doesn't exist
             cursor.execute('''
                 CREATE TABLE LastModified (
-                    Id INT PRIMARY KEY AUTOINCREMENT, 
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT, 
                     FileName VARCHAR(255), 
                     TimeStamp TIMESTAMP
                 )''')
@@ -98,6 +98,7 @@ class CSVFilesystemBackend:
     
 class CSVFS(Operations):
     def __init__(self, root: str):
+        self.PAGE_SIZE = 1000
         self.root = os.path.realpath(root)
         self.csv = CSVFilesystemBackend(root)
 
@@ -122,13 +123,54 @@ class CSVFS(Operations):
         if path in self.virtual_dirs:
             return 'directory'
         elif path.startswith('/data/') and path.endswith('.csv'):
+            if self._is_paginated_file(path):
+                return 'paginated_csv_file'
             return 'csv_file'
+        elif path.startswith('/data/paged_'):
+            return 'paginated_directory'
         elif path.startswith('/sql/queries/') and path.endswith('.sql'):
             return 'query_file'
         elif path.startswith('/sql/results/') and path.endswith('.csv'):
             return 'result_file'
         else:
             return 'unknown'
+        
+    def _is_paginated_file(self, path: str):
+        '''
+        Check if this is a paginated file.
+        '''
+        filename = Path(path).stem
+        
+        import re
+        return re.match(r'.+\.\d+-\d+', filename) is not None
+    
+    def _parse_pagination(self, path: str):
+        '''
+        Parse out the pagination information for a paginated file.
+        '''
+        filename = Path(path).stem
+
+        import re
+        m = re.match(r'(.+)\.(\d+)-(\d+)', filename)
+        if m is None:
+            return None
+        return (m.group(1), int(m.group(2)), int(m.group(3)))
+    
+    def _get_paginated_directories(self):
+        '''
+        Get list of tables that should have paginated directories.
+        '''
+        paginated_dirs = []
+        cursor = self.csv.db.execute('SELECT name FROM sqlite_master WHERE type="table" AND name != "LastModified" AND name != "sqlite_sequence"')
+        for row in cursor:
+            table_name = row[0]
+            # Check if table has more than PAGE_SIZE rows
+            count_df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}`')
+            if count_df is not None and len(count_df) > 0:
+                row_count = count_df.iloc[0]['count']
+                if row_count > self.PAGE_SIZE:
+                    paginated_dirs.append(f'paged_{table_name}')
+        return paginated_dirs
         
     # REQUIRED FUSE OPERATIONS
     def getattr(self, path, fh=None):
@@ -137,7 +179,7 @@ class CSVFS(Operations):
         '''
         file_type = self._get_file_type(path)
 
-        if file_type == 'directory':
+        if file_type == 'directory' or file_type == 'paginated_directory':
             # Directory attributes
             st = {
                 'st_mode': stat.S_IFDIR | 0o755,
@@ -147,28 +189,69 @@ class CSVFS(Operations):
                 'st_mtime': time.time(),
                 'st_atime': time.time(),
             }
-        elif file_type in ['csv_file', 'query_file', 'result_file']:
+        elif file_type in ['csv_file', 'query_file', 'result_file', 'paginated_csv_file']:
             # File attributes
             size = 0
             ctime = time.time()
             mtime = time.time()
             atime = time.time()
-            query_name = Path(path).stem
-            if path in self.virtual_files:
-                size = len(self.virtual_files[path].encode('utf-8'))
+
+            if file_type == 'query_file':
+                # Handle query files - they should always appear to exist once created
+                if path in self.virtual_files:
+                    content = self.virtual_files[path]
+                    size = len(content.encode('utf-8'))
+                else:
+                    # Even if not created yet, report size 0 so editors can create it
+                    raise FuseOSError(errno.ENOENT)
+                    
+            elif file_type == 'result_file':
+                # Handle query results
+                result_name = Path(path).stem
+                
+                if result_name in self.query_results and self.query_results[result_name] is not None:
+                    content = self.query_results[result_name].to_csv(index=False)
+                    size = len(content.encode('utf-8'))
+                else:
+                    # File doesn't exist yet
+                    raise FuseOSError(errno.ENOENT)
+                    
             elif file_type == 'csv_file':
-                # Get size from original CSV or data base
+                # Get size from original CSV or database
                 table_name = Path(path).stem
                 df = self.csv.query(f'SELECT * FROM `{table_name}`')
                 if df is not None:
                     size = len(df.to_csv().encode('utf-8'))
+                    # Get last modified from database
                     for filename, fmtime in self.csv.last_modified.items():
                         if Path(filename).stem == table_name:
                             mtime = fmtime
                             break
-            elif query_name in self.query_results:
-                size = len(self.query_results[query_name].to_csv().encode('utf-8'))
-            
+                else:
+                    raise FuseOSError(errno.ENOENT)
+            elif file_type == 'paginated_csv_file':
+                # Handle paginated CSV file
+                pagination_info = self._parse_pagination(path)
+                if pagination_info:
+                    table_name, start_row, end_row = pagination_info
+                    
+                    # Get paginated data
+                    limit = end_row - start_row + 1
+                    df = self.csv.query(f'SELECT * FROM `{table_name}` LIMIT {limit} OFFSET {start_row}')
+                    
+                    if df is not None and len(df) > 0:
+                        size = len(df.to_csv(index=False).encode('utf-8'))
+                        # Get last modified from database
+                        for filename, fmtime in self.csv.last_modified.items():
+                            if Path(filename).stem == table_name:
+                                mtime = fmtime
+                                break
+                    else:
+                        # This page doesn't exist (beyond end of data)
+                        raise FuseOSError(errno.ENOENT)
+                else:
+                    raise FuseOSError(errno.ENOENT)
+                
             st = {
                 'st_mode': stat.S_IFREG | 0o644,
                 'st_nlink': 1,
@@ -189,12 +272,33 @@ class CSVFS(Operations):
         entries = ['.', '..']
 
         if path == '/':
-            entries.extend(['data', 'backend', 'sql'])
+            entries.extend(['data', 'sql'])
         elif path == '/data':
             # List all CSV tables from data base
-            cursor = self.csv.db.execute('SELECT name FROM sqlite_master WHERE type="table" AND name != "LastModified"')
+            cursor = self.csv.db.execute('SELECT name FROM sqlite_master WHERE type="table" AND name != "LastModified" AND name != "sqlite_sequence"')
             for row in cursor:
-                entries.append(f'{row[0]}.csv')
+                count = self.csv.query(f'SELECT COUNT(*) FROM `{row[0]}`')
+                if count.iloc[0,0] <= self.PAGE_SIZE:
+                    entries.append(f'{row[0]}.csv')
+            # Add paginated directories for large tables
+            paginated_dirs = self._get_paginated_directories()
+            entries.extend(paginated_dirs)
+        elif path.startswith('/data/paged_'):
+            # Handle paginated directory listing
+            dir_name = Path(path).name
+            table_name = dir_name[6:]  # Remove 'paged_' prefix
+            
+            # Get total row count
+            count_df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}`')
+            if count_df is not None and len(count_df) > 0:
+                total_rows = count_df.iloc[0]['count']
+                
+                # Generate page files
+                for start_row in range(0, total_rows, self.PAGE_SIZE):
+                    end_row = min(start_row + self.PAGE_SIZE - 1, total_rows - 1)
+                    if start_row <= end_row:  # Valid page
+                        page_filename = f'{table_name}.{start_row}-{end_row}.csv'
+                        entries.append(page_filename)
         elif path == '/sql':
             entries.extend(['queries', 'results'])
         elif path == '/sql/queries':
@@ -224,6 +328,22 @@ class CSVFS(Operations):
                 content = df.to_csv(index=False)
             else:
                 content = f'Error reading table `{table_name}`'
+        elif file_type == 'paginated_csv_file':
+            # Read paginated CSV data
+            pagination_info = self._parse_pagination(path)
+            if pagination_info:
+                table_name, start_row, end_row = pagination_info
+                
+                # Get paginated data
+                limit = end_row - start_row + 1
+                df = self.csv.query(f'SELECT * FROM `{table_name}` LIMIT {limit} OFFSET {start_row}')
+                
+                if df is not None:
+                    content = df.to_csv(index=False)
+                else:
+                    content = f'Error reading paginated table `{table_name}` rows {start_row}-{end_row}'
+            else:
+                content = 'Invalid pagination format'
         elif file_type == 'query_file':
             # Read SQL query content
             content = self.virtual_files.get(path, '')
@@ -286,7 +406,6 @@ class CSVFS(Operations):
         '''
         Truncate file to specified length.
         '''
-        print(f'truncate called for: {path}')
         file_type = self._get_file_type(path)
 
         if file_type == 'query_file':
@@ -313,6 +432,84 @@ class CSVFS(Operations):
         else:
             raise FuseOSError(errno.EACCES)
         
+    def open(self, path, flags):
+        '''
+        Open a file.
+        '''
+        file_type = self._get_file_type(path)
+
+        if file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file']:
+            return 0
+
+        raise FuseOSError(errno.EACCES)
+    
+    def flush(self, path, fh):
+        '''
+        Flush a file. Used when a file is closed.
+        '''
+        # Nothing for virtual files
+        return 0
+    
+    def release(self, path, fh):
+        '''
+        Release (close) a file.
+        '''
+        # Nothing for virtual files
+        return 0
+    
+    def fsync(self, path, datasync, fh):
+        '''
+        Synchronize file contents.
+        '''
+        # Nothing for virtual files
+        return 0
+        
+    def access(self, path, amode):
+        '''
+        Check file access permissions.
+        '''
+        file_type = self._get_file_type(path)
+
+        if file_type == 'directory' or file_type == 'paginated_directory':
+            return 0 # Directories are always accessible
+        elif file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file']:
+            # Check what type of access is required
+            if amode == os.F_OK:
+                if file_type == 'query_file':
+                    return 0 # Query files can always be created
+                elif file_type == 'result_file':
+                    result_name = Path(path).stem
+                    if result_name in self.query_results:
+                        return 0
+                    else:
+                        raise FuseOSError(errno.ENOENT)
+                elif file_type == 'paginated_csv_file':
+                    # Check if this page exists
+                    pagination_info = self._parse_pagination(path)
+                    if pagination_info:
+                        table_name, start_row, end_row = pagination_info
+                        # Verify the page has data
+                        df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}` WHERE rowid > {start_row}')
+                        if df is not None and len(df) > 0 and df.iloc[0]['count'] > 0:
+                            return 0
+                        else:
+                            raise FuseOSError(errno.ENOENT)
+                    else:
+                        raise FuseOSError(errno.ENOENT)
+                else:
+                    return 0
+            elif amode == os.R_OK: # Read access
+                return  0
+            elif amode == os.W_OK: # Write access
+                if file_type == 'query_file':
+                    return 0
+                else:
+                    raise FuseOSError(errno.EACCES)
+            elif amode == os.X_OK: # Execute access
+                raise FuseOSError(errno.EACCES)
+        
+        raise FuseOSError(errno.ENOENT)
+    
     # HELPER METHODS
 
     def _execute_query(self, query_path):
