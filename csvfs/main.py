@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import sqlite3 as sql
 import pandas as pd
 from pathlib import Path
@@ -554,7 +556,7 @@ def main():
     parser.add_argument('mount_point', help='Mount point for the filesystem')
     parser.add_argument('-f', '--foreground', action='store_true', help='Run in foreground')
     parser.add_argument('-d', '--debug', action='store_true', help='Enable debug output')
-    parser.add_argument('-n', '--page-size', default=3000, type=int, help='Determine how large a paginated CSV should be')
+    parser.add_argument('-n', '--page-size', default=3000, type=int, help='Set number of rows per page for paginated CSVs (default 3000).')
     
     args = parser.parse_args()
     

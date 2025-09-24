@@ -50,10 +50,10 @@ Once mounted, your filesystem will look like this:
 
 | **Option** | **Description** |
 | --- | --- |
-| `-f` | Run in foreground (do not daemonize). |
-| `-d` | Enable debug output for troubleshooting. |
-| `-n SIZE`, `--page-size SIZE` | Set number of rows per page for paginated CSVs (default 3000). |
-| `-h` | Show help message and exit. |
+| `-h`, `--help` | Show help message and exit. |
+| `-f`, `--foreground` | Run in foreground (do not daemonize). |
+| `-d`, `--debug` | Enable debug output for troubleshooting. |
+| `-n PAGE_SIZE`, `--page-size PAGE_SIZE` | Set number of rows per page for paginated CSVs (default 3000). |
 
 ### Example
 
