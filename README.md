@@ -93,10 +93,10 @@ This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 ## Requirements
 
 - Python 3.8+
-- fusepy
-- pandas
+- fusepy (included in installation instructions)
+- pandas (included in installation instructions)
 - SQLite3 (included with Python)
-
+- libFUSE or macFUSE (depends on your OS)
 ---
 
 ## Installation
