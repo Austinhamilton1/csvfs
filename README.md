@@ -44,7 +44,7 @@ Once mounted, your filesystem will look like this:
 
 ## Usage
 
-`python csvfs.py <source_dir> <mount_point> [options]`
+`csvfs <source_dir> <mount_point> [options]`
 
 ### Options
 
@@ -57,7 +57,7 @@ Once mounted, your filesystem will look like this:
 
 ### Example
 
-`python csvfs.py ./my_csvs ./mnt -f -n 2000`
+`csvfs ./my_csvs ./mnt -f -n 2000`
 
 This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 
@@ -66,7 +66,7 @@ This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 ## Workflow Example
 
 1. **Mount the filesystem**:
-    - `python csvs.py ./data ./mnt -f`
+    - `csvfs ./data ./mnt -f`
 2. **Navigate into the mounted folder**:
     - `cd ./mnt/data`
     - `cat small_table.csv`
@@ -97,9 +97,17 @@ This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 - pandas
 - SQLite3 (included with Python)
 
-Install dependencies:
+---
 
-`pip install fusepy pandas`
+## Installation
+
+Clone GitHub repository:
+
+`git clone https://github.com/Austinhamilton1/csvfs.git`
+
+Build project:
+
+`pip install --user -e .`
 
 ---
 
