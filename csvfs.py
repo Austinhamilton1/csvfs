@@ -77,6 +77,11 @@ class CSVFilesystemBackend:
             try:
                 # Try to decode the file using different encoding standards (in case it's a different encoding)
                 df = pd.read_csv(csv_path, encoding=encoding)
+
+                for col in df.select_dtypes(include=['float']):
+                    if (df[col].dropna() % 1 == 0).all():
+                        df[col] = df[col].astype('Int64')
+
                 table_name = Path(csv_path).stem
                 df.to_sql(table_name, self.db, if_exists='replace', index=False)
                 return
@@ -90,12 +95,31 @@ class CSVFilesystemBackend:
         Run an SQL query against the database.
         '''
         try:
-            return pd.read_sql_query(sql, self.db, coerce_float=False)
+            df = pd.read_sql_query(sql, self.db)
+            
+            for col in df.columns:
+                if df[col].dtype == object: # Only process object columns
+                    # Replace empty strings with pandas NA
+                    df[col] = df[col].replace('', pd.NA)
+
+                # Now attempt to convert numeric-looking columns
+                # (ignore errors so strings that aren't numbers stay as they are)
+                try: 
+                    df[col] = pd.to_numeric(df[col])
+                except:
+                    continue
+
+            # After conversion, cast float columns that are actually integers
+            for col in df.select_dtypes(include=['float']):
+                if (df[col].dropna() % 1 == 0).all(): # All are whole numbers
+                    df[col] = df[col].astype('Int64')
+            
+            return df
         except:
             return None
     
 class CSVFS(Operations):
-    def __init__(self, root: str, page_size: int=1000):
+    def __init__(self, root: str, page_size: int=3000):
         self.PAGE_SIZE = page_size
         self.root = os.path.realpath(root)
         self.csv = CSVFilesystemBackend(root)
@@ -296,7 +320,7 @@ class CSVFS(Operations):
                 pagination_info = self._parse_pagination(path)
                 if pagination_info is not None:
                     filename, start_row, end_row = pagination_info
-                    entries.append(f'{filename}.{start_row+1}-{end_row+1}.csv')
+                    entries.append(f'{filename}.{start_row}-{end_row}.csv')
         elif path == '/sql':
             entries.extend(['queries', 'results'])
         elif path == '/sql/queries':
@@ -530,7 +554,7 @@ def main():
     parser.add_argument('mount_point', help='Mount point for the filesystem')
     parser.add_argument('-f', '--foreground', action='store_true', help='Run in foreground')
     parser.add_argument('-d', '--debug', action='store_true', help='Enable debug output')
-    parser.add_argument('-n', '--page-size', default=1000, type=int, help='Determine how large a paginated CSV should be')
+    parser.add_argument('-n', '--page-size', default=3000, type=int, help='Determine how large a paginated CSV should be')
     
     args = parser.parse_args()
     

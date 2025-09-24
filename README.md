@@ -52,12 +52,12 @@ Once mounted, your filesystem will look like this:
 | --- | --- |
 | `-f` | Run in foreground (do not daemonize). |
 | `-d` | Enable debug output for troubleshooting. |
-| `-n SIZE`, `--page-size SIZE` | Set number of rows per page for paginated CSVs (default 1000). |
+| `-n SIZE`, `--page-size SIZE` | Set number of rows per page for paginated CSVs (default 3000). |
 | `-h` | Show help message and exit. |
 
 ### Example
 
-`python csvfs.py ./my_csvs ./mnt -f -p 2000`
+`python csvfs.py ./my_csvs ./mnt -f -n 2000`
 
 This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 
