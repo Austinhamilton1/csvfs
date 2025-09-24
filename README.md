@@ -23,6 +23,7 @@
 
 Once mounted, your filesystem will look like this:  
 
+```
 {mount_point}
 |- data/
 |  |- small_table.csv
@@ -37,6 +38,7 @@ Once mounted, your filesystem will look like this:
 |     |- my_query.sql
 |  |- results/
 |     |- my_query.csv
+```
 
 ---
 
