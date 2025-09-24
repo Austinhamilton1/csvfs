@@ -16,11 +16,11 @@ class CSVFilesystemBackend:
         self.mount_point = Path(mount_point)
         
         # Check if we need to initialize the database
-        db_path = Path(f'{mount_point}/backend')
+        db_path = Path(f'{mount_point}/.backend')
         if not db_path.exists():
             db_path.mkdir()
 
-        self.db = sql.connect(self.mount_point / 'backend/database.db')
+        self.db = sql.connect(self.mount_point / '.backend/database.db')
 
         cursor = self.db.cursor()
 
@@ -95,8 +95,8 @@ class CSVFilesystemBackend:
             return None
     
 class CSVFS(Operations):
-    def __init__(self, root: str):
-        self.PAGE_SIZE = 1000
+    def __init__(self, root: str, page_size: int=1000):
+        self.PAGE_SIZE = page_size
         self.root = os.path.realpath(root)
         self.csv = CSVFilesystemBackend(root)
 
@@ -289,14 +289,14 @@ class CSVFS(Operations):
                     for start_row in range(0, total_rows, self.PAGE_SIZE):
                         end_row = min(start_row + self.PAGE_SIZE - 1, total_rows - 1)
                         if start_row <= end_row:  # Valid page
-                            page_filename = f'{table_name}.{start_row}-{end_row}'
+                            page_filename = f'{table_name}.{start_row+1}-{end_row+1}'
                             entries.append(page_filename)
             elif file_type == 'paginated_leaf_directory':
                 # Get the information from the directory path
                 pagination_info = self._parse_pagination(path)
                 if pagination_info is not None:
-                    filename, start_index, end_index = pagination_info
-                    entries.append(f'{filename}.{start_index}-{end_index}.csv')
+                    filename, start_row, end_row = pagination_info
+                    entries.append(f'{filename}.{start_row+1}-{end_row+1}.csv')
         elif path == '/sql':
             entries.extend(['queries', 'results'])
         elif path == '/sql/queries':
@@ -530,6 +530,7 @@ def main():
     parser.add_argument('mount_point', help='Mount point for the filesystem')
     parser.add_argument('-f', '--foreground', action='store_true', help='Run in foreground')
     parser.add_argument('-d', '--debug', action='store_true', help='Enable debug output')
+    parser.add_argument('-n', '--page-size', default=1000, type=int, help='Determine how large a paginated CSV should be')
     
     args = parser.parse_args()
     
@@ -548,7 +549,7 @@ def main():
     print(f"Mounting {source_path} -> {mount_path}")
     
     try:
-        FUSE(CSVFS(args.source_dir), args.mount_point, 
+        FUSE(CSVFS(args.source_dir, args.page_size), args.mount_point, 
              nothreads=True, foreground=args.foreground, debug=args.debug)
     except Exception as e:
         print(f"FUSE mount failed: {e}")
