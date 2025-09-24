@@ -23,7 +23,6 @@ class CSVFilesystemBackend:
         self.db = sql.connect(self.mount_point / 'backend/database.db')
 
         cursor = self.db.cursor()
-        self.last_modified = {} # Filename -> last modified
 
         # Check for LastModified Table
         cursor.execute('''
@@ -45,7 +44,6 @@ class CSVFilesystemBackend:
                 # Need to check its status in the LastModified table
                 filename = str(csv_file)
                 last_modified = csv_file.stat().st_mtime
-                self.last_modified[filename] = last_modified
 
                 # Check if the status matches
                 cursor.execute('''
@@ -92,7 +90,7 @@ class CSVFilesystemBackend:
         Run an SQL query against the database.
         '''
         try:
-            return pd.read_sql_query(sql, self.db)
+            return pd.read_sql_query(sql, self.db, coerce_float=False)
         except:
             return None
     
@@ -127,6 +125,8 @@ class CSVFS(Operations):
                 return 'paginated_csv_file'
             return 'csv_file'
         elif path.startswith('/data/paged_'):
+            if self._is_paginated_file(path):
+                return 'paginated_leaf_directory'
             return 'paginated_directory'
         elif path.startswith('/sql/queries/') and path.endswith('.sql'):
             return 'query_file'
@@ -139,7 +139,7 @@ class CSVFS(Operations):
         '''
         Check if this is a paginated file.
         '''
-        filename = Path(path).stem
+        filename = Path(path).name
         
         import re
         return re.match(r'.+\.\d+-\d+', filename) is not None
@@ -148,7 +148,7 @@ class CSVFS(Operations):
         '''
         Parse out the pagination information for a paginated file.
         '''
-        filename = Path(path).stem
+        filename = Path(path).name
 
         import re
         m = re.match(r'(.+)\.(\d+)-(\d+)', filename)
@@ -179,7 +179,7 @@ class CSVFS(Operations):
         '''
         file_type = self._get_file_type(path)
 
-        if file_type == 'directory' or file_type == 'paginated_directory':
+        if file_type == 'directory' or file_type == 'paginated_directory' or file_type == 'paginated_leaf_directory':
             # Directory attributes
             st = {
                 'st_mode': stat.S_IFDIR | 0o755,
@@ -222,11 +222,6 @@ class CSVFS(Operations):
                 df = self.csv.query(f'SELECT * FROM `{table_name}`')
                 if df is not None:
                     size = len(df.to_csv().encode('utf-8'))
-                    # Get last modified from database
-                    for filename, fmtime in self.csv.last_modified.items():
-                        if Path(filename).stem == table_name:
-                            mtime = fmtime
-                            break
                 else:
                     raise FuseOSError(errno.ENOENT)
             elif file_type == 'paginated_csv_file':
@@ -241,11 +236,6 @@ class CSVFS(Operations):
                     
                     if df is not None and len(df) > 0:
                         size = len(df.to_csv(index=False).encode('utf-8'))
-                        # Get last modified from database
-                        for filename, fmtime in self.csv.last_modified.items():
-                            if Path(filename).stem == table_name:
-                                mtime = fmtime
-                                break
                     else:
                         # This page doesn't exist (beyond end of data)
                         raise FuseOSError(errno.ENOENT)
@@ -284,21 +274,29 @@ class CSVFS(Operations):
             paginated_dirs = self._get_paginated_directories()
             entries.extend(paginated_dirs)
         elif path.startswith('/data/paged_'):
-            # Handle paginated directory listing
-            dir_name = Path(path).name
-            table_name = dir_name[6:]  # Remove 'paged_' prefix
-            
-            # Get total row count
-            count_df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}`')
-            if count_df is not None and len(count_df) > 0:
-                total_rows = count_df.iloc[0]['count']
+            file_type = self._get_file_type(path)
+            if file_type == 'paginated_directory':
+                # Handle paginated directory listing
+                dir_name = Path(path).name
+                table_name = dir_name[6:]  # Remove 'paged_' prefix
                 
-                # Generate page files
-                for start_row in range(0, total_rows, self.PAGE_SIZE):
-                    end_row = min(start_row + self.PAGE_SIZE - 1, total_rows - 1)
-                    if start_row <= end_row:  # Valid page
-                        page_filename = f'{table_name}.{start_row}-{end_row}.csv'
-                        entries.append(page_filename)
+                # Get total row count
+                count_df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}`')
+                if count_df is not None and len(count_df) > 0:
+                    total_rows = count_df.iloc[0]['count']
+                    
+                    # Generate page files
+                    for start_row in range(0, total_rows, self.PAGE_SIZE):
+                        end_row = min(start_row + self.PAGE_SIZE - 1, total_rows - 1)
+                        if start_row <= end_row:  # Valid page
+                            page_filename = f'{table_name}.{start_row}-{end_row}'
+                            entries.append(page_filename)
+            elif file_type == 'paginated_leaf_directory':
+                # Get the information from the directory path
+                pagination_info = self._parse_pagination(path)
+                if pagination_info is not None:
+                    filename, start_index, end_index = pagination_info
+                    entries.append(f'{filename}.{start_index}-{end_index}.csv')
         elif path == '/sql':
             entries.extend(['queries', 'results'])
         elif path == '/sql/queries':
@@ -470,7 +468,7 @@ class CSVFS(Operations):
         '''
         file_type = self._get_file_type(path)
 
-        if file_type == 'directory' or file_type == 'paginated_directory':
+        if file_type == 'directory' or file_type == 'paginated_directory' or file_type == 'paginated_leaf_directory':
             return 0 # Directories are always accessible
         elif file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file']:
             # Check what type of access is required
@@ -520,8 +518,10 @@ class CSVFS(Operations):
         query_name = Path(query_path).stem
 
         # Execute the query
-        df = self.csv.query(query_content)
-        self.query_results[query_name] = df
+        for query in query_content.split(';'):
+            if len(query.strip()) > 0:
+                df = self.csv.query(query)
+                self.query_results[query_name] = df
     
 def main():
     import argparse
