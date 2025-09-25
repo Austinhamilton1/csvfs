@@ -1,9 +1,9 @@
 import sqlite3 as sql
 import pandas as pd
-import numpy as np
 from pathlib import Path
 import time
 from datetime import datetime
+import json
 
 class Typist:
     def __init__(self, schema: dict[str, type]=None):
@@ -197,6 +197,13 @@ class CSVFilesystemBackend:
                     TimeStamp TIMESTAMP
                 )''')
         
+        # Check for existing schemas
+        saved_schemas = self.mount_point / '.backend/schemas.json'
+        if saved_schemas.exists():
+            schemas = json.load(saved_schemas)
+            for table, schema in schemas:
+                self.typists[table] = Typist(schema=schema)
+
         # Check for schema files
         for schema_file in self.mount_point.iterdir():
             if schema_file.is_file() and schema_file.name.endswith('.csv.schema'):
@@ -242,8 +249,10 @@ class CSVFilesystemBackend:
                     for column, column_type in [row.split(':', 1)]
                 }
 
-                # Set the typists for each csv_file
-                self.typists[Path(csv_file).stem] = Typist(schema=schema)
+                table_name = Path(csv_file).stem
+                if table_name not in self.typists:
+                    # Set the typists for each csv_file
+                    self.typists[table_name] = Typist(schema=schema)
 
         # Make sure the LastModified table is caught up with the underlying files
         for csv_file in self.mount_point.iterdir():
@@ -282,7 +291,8 @@ class CSVFilesystemBackend:
                     self.m_cache[filename] = 0 # Database has potentially stale data
                 
                 # A zero'd m_cache entry signals an update is needed 
-                self.sync_csv_to_db(csv_file)
+                if self.m_cache[csv_file.name] == 0:
+                    self.sync_csv_to_db(csv_file)
 
         self.db.commit()
 
@@ -293,14 +303,11 @@ class CSVFilesystemBackend:
         encodings = ['utf-8', 'latin-1', 'windows-1252', 'iso-8859-1', 'cp1252']
     
         for encoding in encodings:
-            try:
+            try:                
                 # Try to decode the file using different encoding standards (in case it's a different encoding)
                 df = pd.read_csv(csv_path, encoding=encoding)
                 table_name = Path(csv_path).stem
                 df = self.typists[table_name](df)
-
-                if self.m_cache[csv_path.name] != 0:
-                    return
 
                 # Custom dtype mapping for SQLite
                 dtype_mapping = {}
