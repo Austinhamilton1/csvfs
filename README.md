@@ -15,7 +15,11 @@
   - Sequentially executes all statements in the file.
   - The result of the **last query** is automatically written as a CSV file in `sql/results/`.  
 - **Transient Updates** – Make INSERTs, UPDATEs, and DELETEs against the database without affecting the original CSVs.  
-- **Fast Mounting** – Only updates the backend database if the original CSVs have changed since the last mount.  
+- **Fast Mounting** – Only updates the backend database if the original CSVs have changed since the last mount.
+- **Quick Data Analysis** – Quickly parse out simple data analytics (e.g., number of nulls, min, max) just by looking at the stats/{table_name}.json files.
+- **Robust Type Handling** – Manually manage CSV data types or let the heuristic intelligence system manage it for you.
+    - By default, the system intelligently decides data types for you.
+    - For more control, add a {csv_file}.schema file to your source directory to coerce types.
 
 ---
 
@@ -36,8 +40,15 @@ Once mounted, your filesystem will look like this:
 |- sql/
 |  |- queries/
 |     |- my_query.sql
+|     |- ...
 |  |- results/
 |     |- my_query.csv
+|     |- ...
+|- stats/
+|  |- global.json
+|  |- table1.json
+|  |- table2.json
+|  |- ...
 ```
 
 ---
@@ -70,14 +81,17 @@ This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 2. **Navigate into the mounted folder**:
     - `cd ./mnt/data`
     - `cat small_table.csv`
-3. **Run a query**:
+3. **Check file statistics**:
+    - To check file statistics such as data types just check the /mnt/stats/{table_name}.json file:
+        - `cat /mnt/stats/small_table.json`
+4. **Run a query**:
     - Write an SQL file in `/sql/queries/`
-        - `echo 'SELECT * FROM users WHERE age > 30;' > ./mnt/sql/queries/data.sql`
+        - `echo 'SELECT * FROM users WHERE age > 30;' > /mnt/sql/queries/data.sql`
     - Once saved the results will appear in `/sql/results` as shown:
-        - `cat ./mnt/sql/results/data.csv`
-4. **Export modified data**
+        - `cat /mnt/sql/results/data.csv`
+5. **Export modified data**
     - If data was modified in the SQL query before the final `SELECT`:
-        - `cp ./mnt/sql/results/{query_name}.csv <export_file>`
+        - `cp /mnt/sql/results/{query_name}.csv <export_file>`
 
 ---
 
@@ -87,6 +101,8 @@ This mounts `./my_csvs` to `./mnt` with a page size of 2000 rows per file.
 - Makes massive CSVs usable even on resource-constrained machines.
 - Great for ad-hoc analysis, ETL pipelines, and data exploration.
 - Eliminates the need for cumbersome CSV parsing scripts.
+- Simple analytics baked into the file system.
+- Advanced type handling means no need for complicated data type parsing.
 
 ---
 
