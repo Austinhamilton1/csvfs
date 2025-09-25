@@ -29,6 +29,7 @@ class CSVFS(Operations):
             '/sql/queries',
             '/sql/results',
             '/stats',
+            '/schemas'
         }
 
         # Statistics of the mounted filesystem 
@@ -504,31 +505,44 @@ class CSVFS(Operations):
                 
             schema = {}
             for column in data.columns:
-                if pd.api.types.is_integer_dtype(data[column]):
+                if self.csv.typists[table_name].schema[column]['type'] == int:
                     schema[column] = {
                         'type': 'int',
-                        'nulls': len(data[column].isna()),
-                        'min': int(data[column].min()),
-                        'max': int(data[column].max()),
+                        'inferred': self.csv.typists[table_name].schema[column]['inferred'],
+                        'nulls': len(data[data[column].isna()]),
+                        'min': int(data[column].dropna().min()),
+                        'max': int(data[column].dropna().max()),
                     }   
-                elif pd.api.types.is_float_dtype(data[column]):
+                elif self.csv.typists[table_name].schema[column]['type'] == float:
                     schema[column] = {
                         'type': 'float',
-                        'nulls': len(data[column].isna()),
-                        'min': float(data[column].min()),
-                        'max': float(data[column].max()),
-                        'avg': float(data[column].mean()),
+                        'inferred': self.csv.typists[table_name].schema[column]['inferred'],
+                        'nulls': len(data[data[column].isna()]),
+                        'min': float(data[column].dropna().min()),
+                        'max': float(data[column].dropna().max()),
+                        'avg': float(data[column].dropna().mean()),
                     }  
-                elif pd.api.types.is_string_dtype(data[column]):
+                elif self.csv.typists[table_name].schema[column]['type'] == bool:
+                    schema[column] = {
+                        'type': 'bool',
+                        'inferred': self.csv.typists[table_name].schema[column]['inferred'],
+                        'nulls': len(data[data[column].isna()]),
+                    }
+                elif self.csv.typists[table_name].schema[column]['type'] == str:
                     schema[column] = {
                         'type': 'string',
-                        'nulls': len(data[column].isnull()),
+                        'inferred': self.csv.typists[table_name].schema[column]['inferred'],
+                        'nulls': len(data[data[column].isnull()]),
                         'distinct': len(data[column].drop_duplicates()),
                     }
-                elif pd.api.types.is_datetime64_any_dtype(data[column]):
+                elif self.csv.typists[table_name].schema[column]['type'] == type(datetime):
+                    data[column] = pd.to_datetime(data[column], format='%Y-%m-%d %H:%M:%S', errors='coerce')
                     schema[column] = {
                         'type': 'datetime',
-                        'nulls': len(data[column].isnull()),
+                        'inferred': self.csv.typists[table_name].schema[column]['inferred'],
+                        'nulls': len(data[data[column].isnull()]),
+                        'start_date': datetime.strftime(data[column].dropna().min(), '%Y-%m-%d %H:%M:%S'),
+                        'end_date': datetime.strftime(data[column].dropna().max(), '%Y-%m-%d %H:%M:%S'),
                     }
                 else:
                     schema[column] = {
@@ -538,9 +552,9 @@ class CSVFS(Operations):
             self.stats[table_name] = {
                 'file': f'{self.root}/{table_name}.csv',
                 'size_bytes': size_bytes,
-                'last_modified': datetime.strftime(datetime.fromtimestamp(self.csv.m_cache[f'{table_name}.csv']), '%b %d %Y %H:%M:%S.%f'),
+                'last_modified': datetime.strftime(datetime.fromtimestamp(self.csv.m_cache[f'{table_name}.csv']), '%Y-%M-%d %H:%M:%S'),
                 'up_to_date': True,
-                'last_analyzed': datetime.strftime(datetime.fromtimestamp(time.time()), '%b %d %Y %H:%M:%S.%f'),
+                'last_analyzed': datetime.strftime(datetime.fromtimestamp(time.time()), '%Y-%m-%d %H:%M:%S'),
                 'stale_reason': None,
                 'rows': int(self.csv.query(f'SELECT COUNT(*) FROM `{table_name}`').iloc[0, 0]),
                 'columns': len(schema),
