@@ -1,124 +1,19 @@
 #!/usr/bin/env python3
 
-import sqlite3 as sql
-import pandas as pd
+from fuse import FUSE, Operations, FuseOSError
 from pathlib import Path
 
-from fuse import FUSE, Operations, FuseOSError
 import os
 import stat
 import time
 import errno
+import pandas as pd
+import json 
+import re
+import argparse
+from datetime import datetime
 
-class CSVFilesystemBackend:
-    def __init__(self, mount_point: str):
-        '''
-        Interfaces a folder with CSVs in it with a SQLite database backend.
-        '''
-        self.mount_point = Path(mount_point)
-        
-        # Check if we need to initialize the database
-        db_path = Path(f'{mount_point}/.backend')
-        if not db_path.exists():
-            db_path.mkdir()
-
-        self.db = sql.connect(self.mount_point / '.backend/database.db')
-
-        cursor = self.db.cursor()
-
-        # Check for LastModified Table
-        cursor.execute('''
-            SELECT name FROM sqlite_master
-            WHERE type="table" AND name="LastModified"
-        ''')
-        if cursor.fetchone() is None:
-            # Create the last modified table if it doesn't exist
-            cursor.execute('''
-                CREATE TABLE LastModified (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                    FileName VARCHAR(255), 
-                    TimeStamp TIMESTAMP
-                )''')
-        
-        # Make sure the LastModified table is caught up with the underlying files
-        for csv_file in self.mount_point.iterdir():
-            if csv_file.is_file():
-                # Need to check its status in the LastModified table
-                filename = str(csv_file)
-                last_modified = csv_file.stat().st_mtime
-
-                # Check if the status matches
-                cursor.execute('''
-                    SELECT TimeStamp FROM LastModified 
-                    WHERE FileName = ?''', (filename,))
-                result = cursor.fetchone()
-
-                if result is None:
-                    # Table has no data for this file, insert it
-                    cursor.execute('''
-                        INSERT INTO LastModified
-                        (FileName, TimeStamp)
-                        VALUES (?, ?)''', (filename, last_modified))
-                    self.sync_csv_to_db(csv_file) # Newest data needs to be sync'd
-                elif result[0] < last_modified:
-                    # Table has outdated data for this file, update it
-                    cursor.execute('''
-                        UPDATE LastModified
-                        SET TimeStamp = ?
-                        WHERE FileName = ?''', (last_modified, filename))
-                    self.sync_csv_to_db(csv_file) # Database has potentially stale data
-        self.db.commit()
-
-    def sync_csv_to_db(self, csv_path):
-        '''
-        Sync an updated CSV file back to the data base.
-        '''
-        encodings = ['utf-8', 'latin-1', 'windows-1252', 'iso-8859-1', 'cp1252']
-    
-        for encoding in encodings:
-            try:
-                # Try to decode the file using different encoding standards (in case it's a different encoding)
-                df = pd.read_csv(csv_path, encoding=encoding)
-
-                for col in df.select_dtypes(include=['float']):
-                    if (df[col].dropna() % 1 == 0).all():
-                        df[col] = df[col].astype('Int64')
-
-                table_name = Path(csv_path).stem
-                df.to_sql(table_name, self.db, if_exists='replace', index=False)
-                return
-            except UnicodeDecodeError:
-                continue
-            except Exception as e:
-                continue
-
-    def query(self, sql: str):
-        '''
-        Run an SQL query against the database.
-        '''
-        try:
-            df = pd.read_sql_query(sql, self.db)
-            
-            for col in df.columns:
-                if df[col].dtype == object: # Only process object columns
-                    # Replace empty strings with pandas NA
-                    df[col] = df[col].replace('', pd.NA)
-
-                # Now attempt to convert numeric-looking columns
-                # (ignore errors so strings that aren't numbers stay as they are)
-                try: 
-                    df[col] = pd.to_numeric(df[col])
-                except:
-                    continue
-
-            # After conversion, cast float columns that are actually integers
-            for col in df.select_dtypes(include=['float']):
-                if (df[col].dropna() % 1 == 0).all(): # All are whole numbers
-                    df[col] = df[col].astype('Int64')
-            
-            return df
-        except:
-            return None
+from backend import CSVFilesystemBackend
     
 class CSVFS(Operations):
     def __init__(self, root: str, page_size: int=3000):
@@ -132,73 +27,20 @@ class CSVFS(Operations):
             '/data',
             '/sql',
             '/sql/queries',
-            '/sql/results'
+            '/sql/results',
+            '/stats',
         }
+
+        # Statistics of the mounted filesystem 
+        self.stats = {}
 
         # Storage for virual files
         self.virtual_files = {} # path -> content
         self.query_results = {} # query_name -> dataframe
         print('CSVFS initialization complete')
-
-    def _get_file_type(self, path: str):
-        '''
-        Determine what type of file/directory this path represents.
-        '''
-        if path in self.virtual_dirs:
-            return 'directory'
-        elif path.startswith('/data/') and path.endswith('.csv'):
-            if self._is_paginated_file(path):
-                return 'paginated_csv_file'
-            return 'csv_file'
-        elif path.startswith('/data/paged_'):
-            if self._is_paginated_file(path):
-                return 'paginated_leaf_directory'
-            return 'paginated_directory'
-        elif path.startswith('/sql/queries/') and path.endswith('.sql'):
-            return 'query_file'
-        elif path.startswith('/sql/results/') and path.endswith('.csv'):
-            return 'result_file'
-        else:
-            return 'unknown'
-        
-    def _is_paginated_file(self, path: str):
-        '''
-        Check if this is a paginated file.
-        '''
-        filename = Path(path).name
-        
-        import re
-        return re.match(r'.+\.\d+-\d+', filename) is not None
-    
-    def _parse_pagination(self, path: str):
-        '''
-        Parse out the pagination information for a paginated file.
-        '''
-        filename = Path(path).name
-
-        import re
-        m = re.match(r'(.+)\.(\d+)-(\d+)', filename)
-        if m is None:
-            return None
-        return (m.group(1), int(m.group(2)), int(m.group(3)))
-    
-    def _get_paginated_directories(self):
-        '''
-        Get list of tables that should have paginated directories.
-        '''
-        paginated_dirs = []
-        cursor = self.csv.db.execute('SELECT name FROM sqlite_master WHERE type="table" AND name != "LastModified" AND name != "sqlite_sequence"')
-        for row in cursor:
-            table_name = row[0]
-            # Check if table has more than PAGE_SIZE rows
-            count_df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}`')
-            if count_df is not None and len(count_df) > 0:
-                row_count = count_df.iloc[0]['count']
-                if row_count > self.PAGE_SIZE:
-                    paginated_dirs.append(f'paged_{table_name}')
-        return paginated_dirs
         
     # REQUIRED FUSE OPERATIONS
+
     def getattr(self, path, fh=None):
         '''
         Get file attributes (like ls -l).
@@ -211,24 +53,31 @@ class CSVFS(Operations):
                 'st_mode': stat.S_IFDIR | 0o755,
                 'st_nlink': 2,
                 'st_size': 4096,
-                'st_ctime': time.time(),
-                'st_mtime': time.time(),
+                'st_ctime': self.csv.c_time,
+                'st_mtime': self.csv.c_time,
                 'st_atime': time.time(),
             }
-        elif file_type in ['csv_file', 'query_file', 'result_file', 'paginated_csv_file']:
+        elif file_type in ['stats_file', 'csv_file', 'query_file', 'result_file', 'paginated_csv_file']:
             # File attributes
             size = 0
-            ctime = time.time()
-            mtime = time.time()
+            ctime = self.csv.c_time
+            mtime = self.csv.c_time
             atime = time.time()
 
-            if file_type == 'query_file':
+            if file_type == 'stats_file':
+                size = 4096 * 4096 # Default to ensure first read gets all data
+
+                # If the table has been read before we have good data
+                table_name = Path(path).stem
+                if table_name in self.stats:
+                    size = len(json.dumps(self.stats[table_name], indent=2).encode('utf-8'))
+            
+            elif file_type == 'query_file':
                 # Handle query files - they should always appear to exist once created
                 if path in self.virtual_files:
                     content = self.virtual_files[path]
                     size = len(content.encode('utf-8'))
                 else:
-                    # Even if not created yet, report size 0 so editors can create it
                     raise FuseOSError(errno.ENOENT)
                     
             elif file_type == 'result_file':
@@ -288,14 +137,14 @@ class CSVFS(Operations):
         entries = ['.', '..']
 
         if path == '/':
-            entries.extend(['data', 'sql'])
+            entries.extend(['data', 'sql', 'stats'])
         elif path == '/data':
             # List all CSV tables from data base
-            cursor = self.csv.db.execute('SELECT name FROM sqlite_master WHERE type="table" AND name != "LastModified" AND name != "sqlite_sequence"')
-            for row in cursor:
-                count = self.csv.query(f'SELECT COUNT(*) FROM `{row[0]}`')
+            tables = self._get_tables()
+            for table in tables:
+                count = self.csv.query(f'SELECT COUNT(*) FROM `{table}`')
                 if count.iloc[0,0] <= self.PAGE_SIZE:
-                    entries.append(f'{row[0]}.csv')
+                    entries.append(f'{table}.csv')
             # Add paginated directories for large tables
             paginated_dirs = self._get_paginated_directories()
             entries.extend(paginated_dirs)
@@ -334,7 +183,12 @@ class CSVFS(Operations):
             # List query results
             for result_name in self.query_results:
                 entries.append(f'{result_name}.csv')
-        
+        elif path == '/stats':
+            # List all statistic files
+            tables = self._get_tables()
+            for table in tables:
+                entries.append(f'{table}.json')
+            entries.append('global.json')
         return entries
     
     def read(self, path, size, offset, fh):
@@ -378,7 +232,12 @@ class CSVFS(Operations):
                 content = self.query_results[result_name].to_csv(index=False)
             else:
                 content = 'Query result not found'
-        
+        elif file_type == 'stats_file':
+            # Read statistics for a global/table state
+            table_name = Path(path).stem
+            self._update_stats(table_name)
+            content = json.dumps(self.stats[table_name], indent=2)
+
         content_bytes = content.encode('utf-8')
         return content_bytes[offset:offset+size]
     
@@ -462,7 +321,7 @@ class CSVFS(Operations):
         '''
         file_type = self._get_file_type(path)
 
-        if file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file']:
+        if file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file', 'stats_file']:
             return 0
 
         raise FuseOSError(errno.EACCES)
@@ -496,7 +355,7 @@ class CSVFS(Operations):
 
         if file_type == 'directory' or file_type == 'paginated_directory' or file_type == 'paginated_leaf_directory':
             return 0 # Directories are always accessible
-        elif file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file']:
+        elif file_type in ['query_file', 'result_file', 'csv_file', 'paginated_csv_file', 'stats_file']:
             # Check what type of access is required
             if amode == os.F_OK:
                 if file_type == 'query_file':
@@ -511,7 +370,7 @@ class CSVFS(Operations):
                     # Check if this page exists
                     pagination_info = self._parse_pagination(path)
                     if pagination_info:
-                        table_name, start_row, end_row = pagination_info
+                        table_name, start_row, _ = pagination_info
                         # Verify the page has data
                         df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}` WHERE rowid > {start_row}')
                         if df is not None and len(df) > 0 and df.iloc[0]['count'] > 0:
@@ -536,6 +395,158 @@ class CSVFS(Operations):
     
     # HELPER METHODS
 
+    def _get_file_type(self, path: str):
+        '''
+        Determine what type of file/directory this path represents.
+        '''
+        if path in self.virtual_dirs:
+            return 'directory'
+        elif path.startswith('/stats/') and path.endswith('.json'):
+            return 'stats_file'
+        elif path.startswith('/data/') and path.endswith('.csv'):
+            if self._is_paginated_file(path):
+                return 'paginated_csv_file'
+            return 'csv_file'
+        elif path.startswith('/data/paged_'):
+            if self._is_paginated_file(path):
+                return 'paginated_leaf_directory'
+            return 'paginated_directory'
+        elif path.startswith('/sql/queries/') and path.endswith('.sql'):
+            return 'query_file'
+        elif path.startswith('/sql/results/') and path.endswith('.csv'):
+            return 'result_file'
+        else:
+            return 'unknown'
+        
+    def _is_paginated_file(self, path: str):
+        '''
+        Check if this is a paginated file.
+        '''
+        filename = Path(path).name
+
+        return re.match(r'.+\.\d+-\d+', filename) is not None
+    
+    def _parse_pagination(self, path: str):
+        '''
+        Parse out the pagination information for a paginated file.
+        '''
+        filename = Path(path).name
+
+        m = re.match(r'(.+)\.(\d+)-(\d+)', filename)
+        if m is None:
+            return None
+        return (m.group(1), int(m.group(2)), int(m.group(3)))
+    
+    def _get_paginated_directories(self):
+        '''
+        Get list of tables that should have paginated directories.
+        '''
+        paginated_dirs = []
+        tables = self._get_tables()
+
+        for table_name in tables:
+            # Check if table has more than PAGE_SIZE rows
+            count_df = self.csv.query(f'SELECT COUNT(*) as count FROM `{table_name}`')
+            if count_df is not None and len(count_df) > 0:
+                row_count = count_df.iloc[0]['count']
+                if row_count > self.PAGE_SIZE:
+                    paginated_dirs.append(f'paged_{table_name}')
+
+        return paginated_dirs
+    
+    def _update_stats(self, table_name: str):
+        '''
+        Update internal statistics for global/table stats files.
+        '''
+        # Check if 1.) The file is in stats and 2.) It has not been changed.
+        if table_name in self.stats:
+            return
+
+        if table_name == 'global':
+            # Global statistics
+            tables = self._get_tables()
+        
+            total_rows = 0
+            total_columns = 0
+            files = []
+            for table in tables:
+                row_count = int(self.csv.query(f'SELECT COUNT(*) FROM `{table}`').iloc[0, 0])
+                column_count = len(self.csv.query(f'SELECT * FROM `{table}` LIMIT 1'))
+
+                total_rows += row_count
+                total_columns += column_count
+
+                files.append({
+                    'filename': f'{self.root}/{table}.csv',
+                    'stat_file': f'/stats/{table}.json',   
+                })
+
+            self.stats[table_name] = {
+                'up_to_date': True,
+                'files': files,
+                'total_rows': total_rows,
+                'total_columns': total_columns,
+            }
+        else:
+            # Get the size of the file
+            data = self.csv.query(f'SELECT * FROM `{table_name}`')
+            size_bytes = len(data.to_csv().encode('utf-8'))
+                
+            schema = {}
+            for column in data.columns:
+                if pd.api.types.is_integer_dtype(data[column]):
+                    schema[column] = {
+                        'type': 'int',
+                        'nulls': len(data[column].isna()),
+                        'min': int(data[column].min()),
+                        'max': int(data[column].max()),
+                    }   
+                elif pd.api.types.is_float_dtype(data[column]):
+                    schema[column] = {
+                        'type': 'float',
+                        'nulls': len(data[column].isna()),
+                        'min': float(data[column].min()),
+                        'max': float(data[column].max()),
+                        'avg': float(data[column].mean()),
+                    }  
+                elif pd.api.types.is_string_dtype(data[column]):
+                    schema[column] = {
+                        'type': 'string',
+                        'nulls': len(data[column].isnull()),
+                        'distinct': len(data[column].drop_duplicates()),
+                    }
+                elif pd.api.types.is_datetime64_any_dtype(data[column]):
+                    schema[column] = {
+                        'type': 'datetime',
+                        'nulls': len(data[column].isnull()),
+                    }
+                else:
+                    schema[column] = {
+                        'type': 'unknown',
+                    }
+
+            self.stats[table_name] = {
+                'up_to_date': True,
+                'file': f'{self.root}/{table_name}.csv',
+                'size_bytes': size_bytes,
+                'last_modified': datetime.strftime(datetime.fromtimestamp(self.csv.m_cache[f'{table_name}.csv']), '%b %d %Y %H:%M:%S.%f'),
+                'rows': int(self.csv.query(f'SELECT COUNT(*) FROM `{table_name}`').iloc[0, 0]),
+                'columns': len(schema),
+                'schema': schema,
+            }
+
+    def _get_tables(self):
+        ''' 
+        Get a list of all tables currently in the database.
+        '''
+        tables = []
+
+        cursor = self.csv.db.execute('SELECT name FROM sqlite_master WHERE name != "LastModified" AND name != "sqlite_sequence"')
+        for row in cursor:
+            tables.append(row[0])
+
+        return tables
+
     def _execute_query(self, query_path):
         '''
         Execute SQL query and store results.
@@ -550,7 +561,6 @@ class CSVFS(Operations):
                 self.query_results[query_name] = df
     
 def main():
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('source_dir', help='Directory containing CSV files')
     parser.add_argument('mount_point', help='Mount point for the filesystem')
