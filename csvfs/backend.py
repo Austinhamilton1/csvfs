@@ -198,11 +198,8 @@ class CSVFilesystemBackend:
                 )''')
         
         # Check for existing schemas
-        saved_schemas = self.mount_point / '.backend/schemas.json'
-        if saved_schemas.exists():
-            schemas = json.load(saved_schemas)
-            for table, schema in schemas:
-                self.typists[table] = Typist(schema=schema)
+        if (self.mount_point / '.backend/schema.json').exists():
+            self._load_typists()
 
         # Check for schema files
         for schema_file in self.mount_point.iterdir():
@@ -234,23 +231,23 @@ class CSVFilesystemBackend:
                         WHERE FileName = ?''', (last_modified, filename))
                     self.m_cache[csv_file] = 0 # Indicates a refresh is needed
 
-                # Parse out any schema information from the schema file
-                schema_text = schema_file.read_text()
-                schema_lookup = {
-                    'INT': int,
-                    'FLOAT': float,
-                    'BOOL': bool,
-                    'DATE': type(datetime),
-                    'STR': str,
-                }
-                schema = {
-                    column: schema_lookup[column_type]
-                    for row in schema_text.splitlines() if row.strip()
-                    for column, column_type in [row.split(':', 1)]
-                }
-
                 table_name = Path(csv_file).stem
-                if table_name not in self.typists:
+                if self.m_cache[csv_file] == 0 or table_name not in self.typists:
+                    # Parse out any schema information from the schema file
+                    schema_text = schema_file.read_text()
+                    schema_lookup = {
+                        'INT': int,
+                        'FLOAT': float,
+                        'BOOL': bool,
+                        'DATE': type(datetime),
+                        'STR': str,
+                    }
+                    schema = {
+                        column: schema_lookup[column_type]
+                        for row in schema_text.splitlines() if row.strip()
+                        for column, column_type in [row.split(':', 1)]
+                    }
+
                     # Set the typists for each csv_file
                     self.typists[table_name] = Typist(schema=schema)
 
@@ -294,7 +291,59 @@ class CSVFilesystemBackend:
                 if self.m_cache[csv_file.name] == 0:
                     self.sync_csv_to_db(csv_file)
 
+        # Save the typists and the modification information
+        self._save_typists()
         self.db.commit()
+
+    def _load_typists(self):
+        '''
+        Load typist information from the schema file.
+        '''
+        lookup = {
+            'int': int,
+            'float': float,
+            'bool': bool,
+            'date': type(datetime),
+            'str': str,
+        }
+
+        # Parse the types from the schema file
+        schema_file = self.mount_point / '.backend/schema.json'
+        schemas = json.loads(schema_file.read_text())
+        for table in schemas:
+            schema = schemas[table]
+            for column in schema:
+                # Each column needs to point to a type instead of a str
+                schema[column]['type'] = lookup[schema[column]['type']]
+
+            # Update the typists
+            self.typists[table] = Typist()
+            self.typists[table].schema = schema
+
+    def _save_typists(self):
+        '''
+        Save typist information to the schema file.
+        '''
+        lookup = {
+            int: 'int',
+            float: 'float',
+            bool: 'bool',
+            type(datetime): 'date',
+            str: 'str',
+        }
+
+        # Update schemas to contain strings instead of types
+        schemas = {}
+        for table, typist in self.typists.items():
+            schema = {}
+            for column in typist.schema:
+                schema[column] = {
+                    'type': lookup[typist.schema[column]['type']],
+                    'inferred': typist.schema[column]['inferred'],
+                }
+            schemas[table] = schema
+
+        (self.mount_point / '.backend/schema.json').write_text(json.dumps(schemas, indent=2))
 
     def sync_csv_to_db(self, csv_path):
         '''
