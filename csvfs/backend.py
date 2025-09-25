@@ -2,6 +2,7 @@ import sqlite3 as sql
 import pandas as pd
 from pathlib import Path
 import time
+from datetime import datetime
 
 class CSVFilesystemBackend:
     def __init__(self, mount_point: str):
@@ -115,3 +116,177 @@ class CSVFilesystemBackend:
             return df
         except:
             return None
+        
+class Typist:
+    def __init__(self, schema: dict[str, type]=None):
+        self.schema = {col: {'type': schema[col], 'inferred': False} for col in schema.keys()} if schema is not None else {}
+
+    @staticmethod
+    def _infer_number(col: pd.Series) -> tuple[pd.Series, type]:
+        '''
+        Try to convert a column into all numeric values.
+        '''
+        col = pd.to_numeric(col)
+        if (col.dropna() % 1 == 0).all():
+            col = col.astype('Int64')
+            return col, int
+        else:
+            col = col.astype('Float64')
+            return col, float
+        
+    @staticmethod
+    def _infer_bool(col: pd.Series) -> tuple[pd.Series, type]:
+        '''
+        Try to convert a column into all boolean values.
+        '''
+        unique_vals = col.dropna().unique()
+        if len(unique_vals) == 2:
+            lookup = {
+                'true': True,
+                'false': False,
+                'yes': True,
+                'no': False,
+                '1': True,
+                '0': False,
+                't': True,
+                'f': False,
+                'y': True,
+                'n': False,
+            }
+            first, second = str(unique_vals[0]).lower(), str(unique_vals[1]).lower()
+            if first in lookup and second in lookup:
+                col = col.apply(lambda x: lookup[str(x).lower()] if not pd.isna(x) else False).astype(bool)
+                return col, bool
+            else:
+                raise ValueError()
+
+    @staticmethod    
+    def _infer_date(col: pd.Series) -> tuple[pd.Series, type]:
+        '''
+        Try to convert a column into all datetime values.
+        '''
+        try:
+            col = pd.to_datetime(col, format='%m/%d/%Y')
+            return col, type(datetime)
+        except:
+            pass        
+
+        try:
+            col = pd.to_datetime(col, format='%m-%d-%Y')
+            return col, type(datetime)
+        except:
+            pass
+
+        try:
+            col = pd.to_datetime(col, format='%Y-%m-%d')
+            return col, type(datetime)
+        except:
+            pass       
+
+        try:
+            col = pd.to_datetime(col, format='%m/%d/%Y %H:%M:%S')
+            return col, type(datetime)
+        except:
+            pass 
+
+        try:
+            col = pd.to_datetime(col, format='%m/%d/%Y %H:%M:%S.%f')
+            return col, type(datetime)
+        except:
+            pass      
+
+        try:
+            col = pd.to_datetime(col, format='%m-%d-%Y %H:%M:%S')
+            return col, type(datetime)
+        except:
+            pass          
+
+        try:
+            col = pd.to_datetime(col, format='%m-%d-%Y %H:%M:%S.%f')
+            return col, type(datetime)
+        except:
+            pass    
+
+        try:
+            col = pd.to_datetime(col, format='%Y-%m-%d %H:%M:%S')
+            return col, type(datetime)
+        except:
+            pass     
+
+        try:
+            col = pd.to_datetime(col, format='%Y-%m-%d %H:%M:%S.%f')
+            return col, type(datetime)
+        except:
+            pass    
+
+        try:
+            col = pd.to_datetime(col, format='%Y-%m-%dT%H:%M:%S')
+            return col, type(datetime)
+        except:
+            pass
+        
+        try:
+            col = pd.to_datetime(col, format='%Y-%m-%dT%H:%M:%S.%f')
+            return col, type(datetime)
+        except:
+            pass
+
+        raise ValueError()
+
+
+    def infer_types(self, df: pd.DataFrame, columns: list[str]=None):
+        inferred_types = {}
+        
+        columns = df.columns if columns is None else columns
+
+        for col in columns:
+            if col in self.schema:
+                df[col] = df[col].astype(self.schema[col]['type'])
+            else:
+                self.schema[col] = {
+                    'type': None,
+                    'inferred': True,
+                }
+
+                if df[col].dtype == object: # Only process object columns
+                    # Replace empty strings with pandas NA
+                    df[col] = df[col].replace('', pd.NA)
+
+                    # Attempt to convert to numeric-looking columns
+                    try:
+                        df[col], self.schema[col]['type'] = Typist._infer_number(df[col])
+                        continue
+                    except:
+                        pass
+
+                    # Attempt to convert to boolean-looking columns
+                    try:
+                        df[col], self.schema[col]['type'] = Typist._infer_bool(df[col])
+                        continue
+                    except:
+                        pass
+
+                    # Attempt to convert to datetime-looking columns
+                    try:
+                        df[col], self.schema[col]['type'] = Typist._infer_date(df[col])
+                        continue
+                    except:
+                        pass
+
+                    # Default to string
+                    self.schema[col]['type'] = str
+
+        return inferred_types
+
+
+test = pd.DataFrame({
+    'float_row': [10, 64, '', 58.14, 48.5, 46],
+    'int_row': [1, 4, 6.0, 47, 58.0, ''],
+    'bool_row': ['Y', 'N', 'Y', 'Y', 'N', ''],
+    'date_row': ['04/05/2025', '12/12/2024', '', '11/14/1998', '04/20/2014', '05/23/1967'],
+    'str_row': [1, 41.0, 'test', 45, 90.4, 5],
+})
+
+t = Typist(schema={'bool_row': str})
+t.infer_types(test)
+print(test)

@@ -458,11 +458,16 @@ class CSVFS(Operations):
         '''
         Update internal statistics for global/table stats files.
         '''
-        # Check if 1.) The file is in stats and 2.) It has not been changed.
+        # Check if the table is in stats.
+        exists = False
         if table_name in self.stats:
-            return
+            exists = True
 
         if table_name == 'global':
+            # Global statistics should be up to date by default
+            if exists and self.stats[table_name]['up_to_date']:
+                return
+            
             # Global statistics
             tables = self._get_tables()
         
@@ -488,6 +493,11 @@ class CSVFS(Operations):
                 'total_columns': total_columns,
             }
         else:
+            # If the table exists, just show calculated data regardless of staleness
+            # (User must refresh manually; cuts down on expensive analysis)
+            if exists:
+                return
+            
             # Get the size of the file
             data = self.csv.query(f'SELECT * FROM `{table_name}`')
             size_bytes = len(data.to_csv().encode('utf-8'))
@@ -526,10 +536,12 @@ class CSVFS(Operations):
                     }
 
             self.stats[table_name] = {
-                'up_to_date': True,
                 'file': f'{self.root}/{table_name}.csv',
                 'size_bytes': size_bytes,
                 'last_modified': datetime.strftime(datetime.fromtimestamp(self.csv.m_cache[f'{table_name}.csv']), '%b %d %Y %H:%M:%S.%f'),
+                'up_to_date': True,
+                'last_analyzed': datetime.strftime(datetime.fromtimestamp(time.time()), '%b %d %Y %H:%M:%S.%f'),
+                'stale_reason': None,
                 'rows': int(self.csv.query(f'SELECT COUNT(*) FROM `{table_name}`').iloc[0, 0]),
                 'columns': len(schema),
                 'schema': schema,
